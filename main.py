@@ -2,6 +2,7 @@ import argparse
 import sys
 import logging
 
+from click import Path
 from pyparsing import List
 
 
@@ -25,7 +26,17 @@ logger = logging.getLogger("Organizer")
 
 class FileOrganizer:
     def __init__(self, target_dir: str, source_dirs: List[str], config_path: str, auto_mode: bool = False):
-        pass
+        """
+        Initializes the Organizer with target directory (X), source directories (Y),
+        configuration, and interaction mode.
+        """
+        self.target_dir = Path(target_dir).resolve()
+        self.source_dirs = [Path(d).resolve() for d in source_dirs]
+        # All directories combined for general cleaning tasks
+        self.all_dirs = [self.target_dir] + self.source_dirs
+        
+        self.auto_mode = auto_mode
+        self.config = self._load_config(config_path)
 
 
     def remove_empty_and_temp(self):
@@ -81,7 +92,7 @@ def main():
     # Execute Steps
     if args.empty: 
         organizer.remove_empty_and_temp()
-    if args.temporary and not args.empty: # Avoid running twice if both flags set
+    if args.temporary and not args.empty:
         organizer.remove_empty_and_temp()
         
     if args.sanitize: 
