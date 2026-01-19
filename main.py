@@ -1,12 +1,14 @@
-import argparse
-import hashlib
 import os
 import sys
+import shutil
+import hashlib
+import argparse
 import logging
 import stat
-
+import re
 from pathlib import Path
-from pyparsing import List, Optional
+from datetime import datetime
+from typing import List, Optional, Dict
 
 
 # --- TERMINAL COLORS ---
@@ -40,7 +42,6 @@ class FileOrganizer:
         
         self.auto_mode = auto_mode
         self.config = self._load_config(config_path)
-
 
     def _load_config(self, path: str) -> dict:
         """
@@ -91,7 +92,7 @@ class FileOrganizer:
         except Exception as e:
             logger.error(f"{Colors.FAIL}Config parsing error: {e}{Colors.ENDC}")
             return defaults
-        
+
     def _ask_user(self, question: str) -> bool:
         """
         Handles interactive user prompts.
@@ -123,6 +124,9 @@ class FileOrganizer:
         except OSError:
             return None
 
+    # ==========================
+    # === CORE ACTION METHODS ===
+    # ==========================
 
     def remove_empty_and_temp(self):
         """Scans for and removes empty files and files with temporary extensions."""
@@ -153,7 +157,32 @@ class FileOrganizer:
                         logger.error(f"Error accessing {path}: {e}")
 
     def sanitize_filenames(self):
-        pass
+        """Renames files that contain 'bad' characters defined in config."""
+        print(f"\n{Colors.HEADER}=== Sanitizing Filenames ==={Colors.ENDC}")
+        bad_chars = self.config['bad_chars']
+        replace_char = self.config['replace_char']
+
+        for directory in self.all_dirs:
+            if not directory.exists(): continue
+            
+            # topdown=False is required when modifying names while traversing
+            for root, _, files in os.walk(directory, topdown=False):
+                for file in files:
+                    new_name = file
+                    for char in bad_chars:
+                        new_name = new_name.replace(char, replace_char)
+                    
+                    if new_name != file:
+                        old_path = Path(root) / file
+                        new_path = Path(root) / new_name
+                        
+                        print(f"Tricky name found: {file}")
+                        if self._ask_user(f"Rename to '{new_name}'?"):
+                            try:
+                                old_path.rename(new_path)
+                                print(f"{Colors.GREEN}Renamed to: {new_name}{Colors.ENDC}")
+                            except OSError as e:
+                                logger.error(f"Rename failed: {e}")
 
     def fix_permissions(self):
         """Resets file permissions to the default value (e.g., 644)."""
@@ -166,7 +195,7 @@ class FileOrganizer:
                 for file in files:
                     path = Path(root) / file
                     try:
-                        # Get current permissions (masked to standard bits)
+                        # Get current permissions
                         current = stat.S_IMODE(path.stat().st_mode)
                         if current != target_mode:
                             if self._ask_user(f"Fix permissions for {path.name} ({oct(current)} -> {oct(target_mode)})?"):
@@ -176,11 +205,108 @@ class FileOrganizer:
                         pass
 
     def consolidate_and_dedup(self):
-        pass
+        """
+        Merges files from Source Directories (Y) into Target Directory (X).
+        - Content Duplicates: Keeps the OLDEST file.
+        - Name Collisions: Keeps the NEWEST file.
+        """
+        print(f"\n{Colors.HEADER}=== Consolidating to Target (X) ==={Colors.ENDC}")
+        
+        # Index the Target Directory (X)
+        print("Indexing Target Directory...")
+        x_index = {} # {hash: Path}
+        
+        if self.target_dir.exists():
+            for root, _, files in os.walk(self.target_dir):
+                for file in files:
+                    path = Path(root) / file
+                    h = self._calculate_hash(path)
+                    if h:
+                        # If duplicate inside X, ensure index points to the oldest one
+                        if h not in x_index or path.stat().st_mtime < x_index[h].stat().st_mtime:
+                            x_index[h] = path
 
-    def _load_config(self, config_path: str):
-        pass
+        # Process Source Directories (Y)
+        for source_dir in self.source_dirs:
+            if not source_dir.exists(): 
+                print(f"{Colors.WARNING}Source not found: {source_dir}{Colors.ENDC}")
+                continue
+            
+            print(f"Scanning Source: {source_dir}")
+            
+            for root, _, files in os.walk(source_dir):
+                for file in files:
+                    src_path = Path(root) / file
+                    src_hash = self._calculate_hash(src_path)
+                    
+                    if not src_hash: continue
 
+                    # --- SCENARIO A: Content Duplicate Found ---
+                    if src_hash in x_index:
+                        existing = x_index[src_hash]
+                        src_time = src_path.stat().st_mtime
+                        dst_time = existing.stat().st_mtime
+                        
+                        # Task: Suggest keeping oldest
+                        if src_time < dst_time:
+                            print(f"{Colors.WARNING}Duplicate found! Source is OLDER (Original).{Colors.ENDC}")
+                            print(f" Source: {src_path} ({datetime.fromtimestamp(src_time)})")
+                            print(f" Target: {existing} ({datetime.fromtimestamp(dst_time)})")
+                            
+                            if self._ask_user("Replace newer file in X with older original from Y?"):
+                                try:
+                                    shutil.move(str(src_path), str(existing))
+                                    print(f"{Colors.GREEN}Restored original to X.{Colors.ENDC}")
+                                except OSError as e:
+                                    logger.error(f"Move failed: {e}")
+                        else:
+                            if self._ask_user(f"Delete duplicate copy in Y: {src_path.name}?"):
+                                try:
+                                    src_path.unlink()
+                                    print(f"{Colors.FAIL}Deleted duplicate.{Colors.ENDC}")
+                                except OSError as e:
+                                    logger.error(f"Delete failed: {e}")
+                    
+                    # --- SCENARIO B: Unique Content (Move to X) ---
+                    else:
+                        try:
+                            rel_path = src_path.relative_to(source_dir)
+                        except ValueError:
+                            rel_path = src_path.name
+                        
+                        dest_path = self.target_dir / rel_path
+                        
+                        # Handle Name Collisions (Different content, same name)
+                        if dest_path.exists():
+                            src_time = src_path.stat().st_mtime
+                            dst_time = dest_path.stat().st_mtime
+                            
+                            # Task: "W przypadku plików o tej samej nazwie sugerować pozostawienie nowszego"
+                            if src_time > dst_time:
+                                print(f"{Colors.WARNING}Name Conflict! Source is NEWER.{Colors.ENDC}")
+                                print(f" Source: {src_path} ({datetime.fromtimestamp(src_time)})")
+                                print(f" Target: {dest_path} ({datetime.fromtimestamp(dst_time)})")
+                                
+                                if self._ask_user(f"Overwrite older {dest_path.name} with newer version?"):
+                                    try:
+                                        dest_path.parent.mkdir(parents=True, exist_ok=True)
+                                        shutil.move(str(src_path), str(dest_path))
+                                        x_index[src_hash] = dest_path # Update index
+                                        print(f"{Colors.GREEN}Updated file.{Colors.ENDC}")
+                                    except OSError as e:
+                                        logger.error(f"Overwrite failed: {e}")
+                            else:
+                                print(f"Skipping older/same version: {src_path.name}")
+                        else:
+                            # No collision, simple move
+                            if self._ask_user(f"Move unique file {src_path.name} to X?"):
+                                try:
+                                    dest_path.parent.mkdir(parents=True, exist_ok=True)
+                                    shutil.move(str(src_path), str(dest_path))
+                                    x_index[src_hash] = dest_path # Update index
+                                    print(f"{Colors.GREEN}Moved.{Colors.ENDC}")
+                                except OSError as e:
+                                    logger.error(f"Move failed: {e}")
 # --- MAIN EXECUTION ---
 def main():
     parser = argparse.ArgumentParser(description="University Project: File System Organizer")
