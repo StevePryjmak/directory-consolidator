@@ -1,9 +1,10 @@
 import argparse
+import hashlib
 import sys
 import logging
 
-from click import Path
-from pyparsing import List
+from pathlib import Path
+from pyparsing import List, Optional
 
 
 # --- TERMINAL COLORS ---
@@ -37,6 +38,88 @@ class FileOrganizer:
         
         self.auto_mode = auto_mode
         self.config = self._load_config(config_path)
+
+
+    def _load_config(self, path: str) -> dict:
+        """
+        Loads configuration from a file. 
+        Supports simple KEY="VALUE" format (Bash-style) to be compatible with legacy config files.
+        """
+        defaults = {
+            'temp_ext': ['.tmp', '.bak', '.~', '.swp', '.ds_store', '.old'],
+            'bad_chars': [':', '*', '?', '"', '<', '>', '|', '$', ' '],
+            'replace_char': '_',
+            'perms': 0o644
+        }
+        
+        config_path = Path(path).expanduser()
+        
+        # Fallback: look in current directory if specific path not found
+        if not config_path.exists():
+            local_conf = Path.cwd() / ".clean_files"
+            if local_conf.exists():
+                config_path = local_conf
+
+        if not config_path.exists():
+            logger.warning(f"{Colors.WARNING}Config file not found. Using internal defaults.{Colors.ENDC}")
+            return defaults
+
+        logger.info(f"Loading config from: {config_path}")
+        try:
+            settings = defaults.copy()
+            with open(config_path, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith('#'): continue
+                    
+                    if '=' in line:
+                        key, val = line.split('=', 1)
+                        val = val.strip().strip('"\'')
+                        
+                        if key == 'TMP_FILES':
+                            settings['temp_ext'] = [x.strip() for x in val.split(',')]
+                        elif key == 'TRICKY_LETTERS':
+                            settings['bad_chars'] = list(val.replace(' ', '')) 
+                            if ' ' in val: settings['bad_chars'].append(' ')
+                        elif key == 'TRICKY_LETTER_SUBSTITUTE':
+                            settings['replace_char'] = val
+                        elif key == 'SUGGESTED_ACCESS':
+                            settings['perms'] = int(val, 8)
+            return settings
+        except Exception as e:
+            logger.error(f"{Colors.FAIL}Config parsing error: {e}{Colors.ENDC}")
+            return defaults
+        
+    def _ask_user(self, question: str) -> bool:
+        """
+        Handles interactive user prompts.
+        Returns True for 'yes', False for 'no'.
+        """
+        if self.auto_mode:
+            return True
+        
+        while True:
+            response = input(f"{Colors.BLUE}{question} [y/n/all]: {Colors.ENDC}").lower().strip()
+            if response in ['y', 'yes']:
+                return True
+            if response in ['n', 'no']:
+                return False
+            if response in ['a', 'all']:
+                self.auto_mode = True
+                print(f"{Colors.BOLD}Auto-mode enabled for remaining operations.{Colors.ENDC}")
+                return True
+
+    def _calculate_hash(self, filepath: Path) -> Optional[str]:
+        """Calculates MD5 hash for content comparison. Optimized for large files."""
+        hasher = hashlib.md5()
+        try:
+            with open(filepath, 'rb') as f:
+                # Read in 8KB chunks to avoid memory issues
+                while chunk := f.read(8192):
+                    hasher.update(chunk)
+            return hasher.hexdigest()
+        except OSError:
+            return None
 
 
     def remove_empty_and_temp(self):
