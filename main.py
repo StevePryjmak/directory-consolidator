@@ -1,7 +1,9 @@
 import argparse
 import hashlib
+import os
 import sys
 import logging
+import stat
 
 from pathlib import Path
 from pyparsing import List, Optional
@@ -123,13 +125,55 @@ class FileOrganizer:
 
 
     def remove_empty_and_temp(self):
-        pass
+        """Scans for and removes empty files and files with temporary extensions."""
+        print(f"\n{Colors.HEADER}=== Cleaning Junk Files ==={Colors.ENDC}")
+        temp_exts = self.config['temp_ext']
+        
+        for directory in self.all_dirs:
+            if not directory.exists(): continue
+            
+            for root, _, files in os.walk(directory):
+                for file in files:
+                    path = Path(root) / file
+                    try:
+                        # 1. Check Empty
+                        if path.stat().st_size == 0:
+                            if self._ask_user(f"Remove EMPTY file: {path.name}?"):
+                                path.unlink()
+                                print(f"{Colors.FAIL}Deleted empty: {path}{Colors.ENDC}")
+                                continue
+                        
+                        # 2. Check Temp Extensions
+                        if any(file.endswith(ext) for ext in temp_exts):
+                            if self._ask_user(f"Remove TEMP file: {path.name}?"):
+                                path.unlink()
+                                print(f"{Colors.FAIL}Deleted temp: {path}{Colors.ENDC}")
+
+                    except OSError as e:
+                        logger.error(f"Error accessing {path}: {e}")
 
     def sanitize_filenames(self):
         pass
 
     def fix_permissions(self):
-        pass
+        """Resets file permissions to the default value (e.g., 644)."""
+        print(f"\n{Colors.HEADER}=== Fixing Permissions ==={Colors.ENDC}")
+        target_mode = self.config['perms']
+        
+        for directory in self.all_dirs:
+            if not directory.exists(): continue
+            for root, _, files in os.walk(directory):
+                for file in files:
+                    path = Path(root) / file
+                    try:
+                        # Get current permissions (masked to standard bits)
+                        current = stat.S_IMODE(path.stat().st_mode)
+                        if current != target_mode:
+                            if self._ask_user(f"Fix permissions for {path.name} ({oct(current)} -> {oct(target_mode)})?"):
+                                path.chmod(target_mode)
+                                print(f"{Colors.GREEN}Fixed: {path.name}{Colors.ENDC}")
+                    except OSError:
+                        pass
 
     def consolidate_and_dedup(self):
         pass
