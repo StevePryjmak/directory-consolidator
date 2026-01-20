@@ -1,0 +1,11 @@
+# Target permissions (Octal, usually 644 or 755)
+SUGGESTED_ACCESS="644"
+
+# Characters to remove from filenames
+TRICKY_LETTERS=":\"';*?#|\\$ "
+
+# Character to replace tricky letters with
+TRICKY_LETTER_SUBSTITUTE="_"
+
+# Comma-separated list of extensions to delete
+TMP_FILES=".tmp, .bak, .swp, .~, .ds_store, .old"
